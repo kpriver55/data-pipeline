@@ -1,0 +1,19 @@
+# Core dependencies
+pandas>=2.0.0
+numpy>=1.24.0
+pydantic>=2.0.0
+
+# Data generation
+faker>=20.0.0
+python-dateutil>=2.8.0
+scipy>=1.10.0
+
+# Data export
+pyarrow>=14.0.0  # For Parquet support
+
+# LLM integration (optional)
+requests>=2.31.0  # For Ollama HTTP API
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
