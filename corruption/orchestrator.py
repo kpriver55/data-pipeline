@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from corruption.base import CorruptionConfig, CorruptionStrategy
+from corruption.cleaning_script_generator import auto_clean_dataset
 from corruption.duplicates import DuplicatesCorruption
 from corruption.missing_values import MissingValuesCorruption
 from corruption.numeric_issues import NumericOutliersCorruption
@@ -42,19 +43,20 @@ class CorruptionOrchestrator:
         }
 
     def corrupt(
-        self, df_clean: pd.DataFrame, config: CorruptionConfig
-    ) -> tuple[pd.DataFrame, Dict[str, Any]]:
+        self, df_perfect: pd.DataFrame, config: CorruptionConfig
+    ) -> tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
         """
-        Apply corruption strategies to create a dirty dataset.
+        Apply corruption strategies to create a dirty dataset, then auto-clean
+        to produce the "recovered clean" dataset (actual target).
 
         Args:
-            df_clean: Clean dataframe
+            df_perfect: Perfect synthetic dataframe (unrealistically clean)
             config: Corruption configuration
 
         Returns:
-            Tuple of (corrupted dataframe, metadata dict)
+            Tuple of (dirty dataframe, recovered clean dataframe, metadata dict)
         """
-        df_corrupt = df_clean.copy()
+        df_dirty = df_perfect.copy()
         applied_strategies = []
         all_operations = []
 
@@ -70,23 +72,33 @@ class CorruptionOrchestrator:
             print(f"  - Applying {strategy_name}...")
 
             # Apply corruption
-            df_corrupt = strategy.corrupt(df_corrupt, config.rates)
+            df_dirty = strategy.corrupt(df_dirty, config.rates)
 
             # Track metadata
             applied_strategies.append(strategy_name)
             all_operations.extend(strategy.get_required_operations())
 
-        # Generate metadata
+        # Generate initial metadata
         metadata = {
             "corruption_config": config.to_dict(),
             "applied_strategies": applied_strategies,
             "required_operations": list(set(all_operations)),  # Unique operations
-            "clean_shape": df_clean.shape,
-            "corrupt_shape": df_corrupt.shape,
-            "corruption_summary": self._generate_summary(df_clean, df_corrupt),
+            "perfect_shape": df_perfect.shape,
+            "dirty_shape": df_dirty.shape,
+            "corruption_summary": self._generate_summary(df_perfect, df_dirty),
         }
 
-        return df_corrupt, metadata
+        # Auto-clean to get the recovered clean dataset (actual target)
+        df_recovered_clean, cleaning_operations = auto_clean_dataset(df_dirty, metadata)
+
+        # Update metadata with cleaning info
+        metadata["recovered_clean_shape"] = df_recovered_clean.shape
+        metadata["cleaning_operations"] = cleaning_operations
+        metadata["recovery_summary"] = self._generate_recovery_summary(
+            df_perfect, df_dirty, df_recovered_clean
+        )
+
+        return df_dirty, df_recovered_clean, metadata
 
     def _generate_summary(
         self, df_clean: pd.DataFrame, df_corrupt: pd.DataFrame
@@ -132,6 +144,49 @@ class CorruptionOrchestrator:
 
         return summary
 
+    def _generate_recovery_summary(
+        self,
+        df_perfect: pd.DataFrame,
+        df_dirty: pd.DataFrame,
+        df_recovered: pd.DataFrame,
+    ) -> Dict[str, Any]:
+        """
+        Generate a summary comparing perfect, dirty, and recovered clean datasets.
+
+        Args:
+            df_perfect: Original perfect synthetic data
+            df_dirty: Corrupted data
+            df_recovered: Recovered clean data (actual target)
+
+        Returns:
+            Dictionary with recovery statistics
+        """
+        summary = {}
+
+        # Shape comparison
+        summary["perfect_rows"] = len(df_perfect)
+        summary["dirty_rows"] = len(df_dirty)
+        summary["recovered_rows"] = len(df_recovered)
+        summary["rows_lost_in_recovery"] = len(df_dirty) - len(df_recovered)
+
+        # Missing values comparison
+        summary["perfect_missing"] = int(df_perfect.isnull().sum().sum())
+        summary["dirty_missing"] = int(df_dirty.isnull().sum().sum())
+        summary["recovered_missing"] = int(df_recovered.isnull().sum().sum())
+
+        # Duplicates comparison
+        summary["perfect_duplicates"] = int(df_perfect.duplicated().sum())
+        summary["dirty_duplicates"] = int(df_dirty.duplicated().sum())
+        summary["recovered_duplicates"] = int(df_recovered.duplicated().sum())
+
+        # Note about recovery
+        summary["note"] = (
+            "The 'recovered clean' dataset is the actual target for the agent. "
+            "It won't match the perfect dataset, but represents what's achievable."
+        )
+
+        return summary
+
     def get_strategy_logs(self) -> Dict[str, List[Dict[str, Any]]]:
         """
         Get corruption logs from all strategies.
@@ -153,23 +208,23 @@ class CorruptionOrchestrator:
 
 
 def corrupt_dataset(
-    df_clean: pd.DataFrame,
+    df_perfect: pd.DataFrame,
     config: Optional[CorruptionConfig] = None,
     seed: Optional[int] = None,
-) -> tuple[pd.DataFrame, Dict[str, Any]]:
+) -> tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
     """
-    Convenience function to corrupt a clean dataset.
+    Convenience function to corrupt a dataset and generate recovered clean target.
 
     Args:
-        df_clean: Clean dataframe to corrupt
+        df_perfect: Perfect synthetic dataframe to corrupt
         config: Corruption configuration (defaults to medium preset)
         seed: Random seed for reproducibility
 
     Returns:
-        Tuple of (corrupted dataframe, metadata dict)
+        Tuple of (dirty dataframe, recovered clean dataframe, metadata dict)
     """
     if config is None:
         config = CorruptionConfig.from_preset("medium", seed=seed)
 
     orchestrator = CorruptionOrchestrator(seed=seed)
-    return orchestrator.corrupt(df_clean, config)
+    return orchestrator.corrupt(df_perfect, config)

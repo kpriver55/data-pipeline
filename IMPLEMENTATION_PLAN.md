@@ -180,9 +180,59 @@ corruption_config = {
 - Suggest appropriate sentinel values for missing data
 - **NOT used for**: Typo generation (removed)
 
+### Phase 3.5: Recovered Clean Dataset Generation
+
+**Purpose**: Generate the "recovered clean" dataset - the actual achievable target for the agent
+
+**Key Insight**: The perfect synthetic data generated in Phase 2 is **unrealistically clean**. In practice, no matter how good a cleaning agent is, some information cannot be recovered after corruption:
+- Outliers removed → row count changes
+- Duplicates removed → row count changes
+- Type conversion with `errors='coerce'` → may create new NaN values
+- Missing value imputation → approximations, not exact recovery
+
+**Solution**: Auto-clean the dirty dataset using the same operations the agent would perform. This produces the "recovered clean" dataset, which is the **actual target** the agent should achieve.
+
+**Components**:
+- `corruption/cleaning_script_generator.py`: Maps corruption metadata to cleaning operations
+- `auto_clean_dataset()`: Automatically applies cleaning steps in proper order
+
+**Cleaning Operation Order** (Critical):
+1. `clean_text_columns` - FIRST: Clean text so type conversion can work
+2. `convert_data_types` - SECOND: Fix types after text is clean
+3. `handle_missing_values` - THIRD: Handle missing after types are correct
+4. `remove_outliers` - FOURTH: Remove outliers (needs correct types)
+5. `remove_duplicates` - LAST: Remove duplicates
+
+**Updated Orchestrator Output**:
+```python
+# OLD: Returns 2 values
+df_dirty, metadata = corrupt_dataset(df_clean, config)
+
+# NEW: Returns 3 values
+df_dirty, df_recovered_clean, metadata = corrupt_dataset(df_perfect, config)
+```
+
+**Three Dataset Types**:
+1. **Perfect Synthetic** (df_perfect): Unrealistically clean, generated in Phase 2
+2. **Dirty** (df_dirty): Corrupted version with data quality issues
+3. **Recovered Clean** (df_recovered_clean): **ACTUAL TARGET** - what the agent should achieve
+
+**Metadata Enhancements**:
+- `cleaning_operations`: List of operations applied to recover clean data
+- `recovery_summary`: Stats comparing perfect → dirty → recovered
+  - Row counts (shows rows lost in outlier/duplicate removal)
+  - Missing value counts (may increase due to type coercion)
+  - Duplicate counts
+
+**Why This Matters**:
+- Training the agent to match perfect synthetic data would be impossible
+- The recovered clean dataset represents realistic, achievable cleaning
+- Agent evaluation should compare to recovered clean, not perfect clean
+- More accurate difficulty assessment based on what's actually achievable
+
 ### Phase 4: Validation Layer
 
-**Purpose**: Ensure raw data can be cleaned to the clean version using agent's tools
+**Purpose**: Ensure raw data can be cleaned to the **recovered clean version** using agent's tools
 
 **Components**:
 - `validation/consistency_checker.py`: Verify raw→clean mappings
@@ -219,17 +269,17 @@ corruption_config = {
 # 1. Define or generate schema
 schema = generate_schema(domain="e-commerce", num_columns=10)
 
-# 2. Generate clean data
-clean_df = generate_clean_data(schema, num_rows=10000)
+# 2. Generate perfect synthetic data
+perfect_df = generate_clean_data(schema, num_rows=1000)
 
-# 3. Apply corruption
-raw_df = apply_corruption(clean_df, corruption_config)
+# 3. Apply corruption and generate recovered clean target
+raw_df, recovered_clean_df, metadata = apply_corruption(perfect_df, corruption_config)
 
 # 4. Validate consistency
-validate_pair(raw_df, clean_df)
+validate_pair(raw_df, recovered_clean_df)
 
-# 5. Export
-export_pair(raw_df, clean_df, output_dir="./output")
+# 5. Export (use recovered_clean as the target, not perfect)
+export_pair(raw_df, recovered_clean_df, metadata, output_dir="./output")
 ```
 
 ### Phase 6: Export and Metadata
@@ -240,18 +290,22 @@ export_pair(raw_df, clean_df, output_dir="./output")
 
 **Outputs**:
 - `raw_dataset.csv`: Dirty dataset
-- `clean_dataset.csv`: Clean dataset (target state)
+- `clean_dataset.csv`: Recovered clean dataset (**actual achievable target**)
 - `metadata.json`: Complete dataset documentation
   - Schema definition
   - Corruption types and rates applied
   - Statistics (missing %, duplicate %, outlier %)
   - Required agent operations to clean
+  - Cleaning operations applied during recovery
   - Expected operation sequence
   - Difficulty level (easy/medium/hard)
+  - Recovery summary (perfect → dirty → recovered stats)
 - `data_quality_report.json`: Detailed issue inventory
   - Per-column quality metrics
   - Specific corruption locations
   - Solvability verification results
+
+**Note**: The "clean" dataset is the **recovered clean** version, not the perfect synthetic. This represents what the agent can realistically achieve.
 
 ### Phase 7: Streamlit App Wrapper
 
@@ -373,6 +427,7 @@ data-pipeline/
 │   ├── numeric_issues.py        # Outliers (IQR/z-score detectable)
 │   ├── type_corruption.py       # Convert to wrong types (but parseable)
 │   ├── duplicates.py            # Exact duplicates only
+│   ├── cleaning_script_generator.py  # Maps corruptions to cleaning operations (Phase 3.5)
 │   └── orchestrator.py          # Coordinate all corruption strategies
 ├── validation/
 │   ├── __init__.py
@@ -410,13 +465,14 @@ streamlit  # For web UI (Phase 7)
 
 ## Implementation Priority
 
-1. **Phase 1**: Schema definition system (foundation)
-2. **Phase 2**: Clean data generation (core functionality)
-3. **Phase 3**: Corruption engine (key differentiator)
-4. **Phase 4**: Validation layer (ensures quality)
-5. **Phase 5**: Pipeline orchestration (ties everything together)
-6. **Phase 6**: Export and metadata (polish)
-7. **Phase 7**: Streamlit app wrapper (user interface)
+1. **Phase 1**: Schema definition system (foundation) ✅ **COMPLETE**
+2. **Phase 2**: Clean data generation (core functionality) ✅ **COMPLETE**
+3. **Phase 3**: Corruption engine (key differentiator) ✅ **COMPLETE**
+4. **Phase 3.5**: Recovered clean dataset generation (critical insight) ✅ **COMPLETE**
+5. **Phase 4**: Validation layer (ensures quality)
+6. **Phase 5**: Pipeline orchestration (ties everything together)
+7. **Phase 6**: Export and metadata (polish)
+8. **Phase 7**: Streamlit app wrapper (user interface)
 
 ## Success Criteria
 
@@ -439,17 +495,17 @@ pipeline = SyntheticDataPipeline(
     ollama_host="localhost:11434"
 )
 
-# Generate dataset pair
-raw_df, clean_df, metadata = pipeline.generate(
+# Generate dataset trio (perfect, dirty, recovered_clean)
+raw_df, recovered_clean_df, metadata = pipeline.generate(
     config=ECOMMERCE_CONFIG,
     num_rows=50000,
-    corruption_level="medium"  # low, medium, high
+    corruption_level="medium"  # easy, medium, hard
 )
 
-# Export
+# Export (using recovered_clean as the actual target)
 pipeline.export(
     raw_df=raw_df,
-    clean_df=clean_df,
+    clean_df=recovered_clean_df,  # This is the achievable target
     metadata=metadata,
     output_dir="./output/ecommerce_dataset"
 )

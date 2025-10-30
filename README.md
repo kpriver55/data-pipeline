@@ -44,6 +44,12 @@ pip install -r requirements.txt
 - Randomized difficulty presets
 - Orchestrator for applying multiple corruptions
 
+✅ **Phase 3.5: Recovered Clean Dataset Generation** (Complete)
+- Cleaning script generator maps corruptions to operations
+- Auto-clean function generates achievable target
+- Returns 3 datasets: perfect, dirty, recovered clean
+- **Critical**: The agent trains on recovered clean, NOT perfect synthetic
+
 ⏳ **Phase 4: Validation Layer** (Planned)
 - Consistency checking
 - Solvability verification
@@ -62,6 +68,26 @@ pip install -r requirements.txt
 - Interactive schema builder
 - Real-time data preview
 - Batch generation interface
+
+## The Recovered Clean Concept
+
+**Why not use perfect synthetic data as the target?**
+
+Perfect synthetic data is unrealistically clean. In practice, even excellent cleaning cannot perfectly recover the original data:
+
+- **Outliers removed** → Row count decreases
+- **Duplicates removed** → Row count decreases
+- **Type conversion with `errors='coerce'`** → May create new NaN values for unparseable data
+- **Missing value imputation** → Creates approximations, not exact values
+
+**The Solution: Recovered Clean Datasets**
+
+The pipeline generates **three datasets**:
+1. **Perfect Synthetic** - Unrealistically clean (generated in Phase 2)
+2. **Dirty** - Corrupted version with data quality issues (generated in Phase 3)
+3. **Recovered Clean** - Auto-cleaned version (**actual achievable target**)
+
+The agent should be trained to match the **recovered clean** dataset, which represents what's realistically achievable given the agent's capabilities.
 
 ## Quick Start
 
@@ -88,18 +114,22 @@ from generators.clean_data_builder import build_clean_dataset
 from corruption.base import CorruptionConfig
 from corruption.orchestrator import corrupt_dataset
 
-# Generate clean data
+# Generate perfect synthetic data
 generator = SchemaGenerator()
 schema = generator.generate_ecommerce_schema(num_rows=1000)
-df_clean = build_clean_dataset(schema, seed=42)
+df_perfect = build_clean_dataset(schema, seed=42)
 
 # Apply corruption (medium difficulty = 3-4 random strategies)
+# Returns 3 datasets: dirty, recovered_clean, metadata
 config = CorruptionConfig.from_preset("medium", seed=42)
-df_dirty, metadata = corrupt_dataset(df_clean, config, seed=42)
+df_dirty, df_recovered_clean, metadata = corrupt_dataset(df_perfect, config, seed=42)
 
-# Save both versions
-df_clean.to_csv("output/clean.csv", index=False)
+# Save RECOVERED CLEAN (the actual target) and dirty version
+df_recovered_clean.to_csv("output/clean.csv", index=False)  # Achievable target
 df_dirty.to_csv("output/dirty.csv", index=False)
+
+# Optional: Save perfect synthetic for comparison
+# df_perfect.to_csv("output/perfect_synthetic.csv", index=False)
 ```
 
 ### Custom Corruption
@@ -113,7 +143,7 @@ config = CorruptionConfig.custom(
     seed=42
 )
 
-df_dirty, metadata = corrupt_dataset(df_clean, config, seed=42)
+df_dirty, df_recovered_clean, metadata = corrupt_dataset(df_perfect, config, seed=42)
 ```
 
 ## Corruption Strategies
@@ -159,12 +189,14 @@ data-pipeline/
 │   ├── numeric_issues.py    # Outliers
 │   ├── type_corruption.py
 │   ├── duplicates.py
+│   ├── cleaning_script_generator.py  # Maps corruptions to operations (Phase 3.5)
 │   └── orchestrator.py      # Coordinates all strategies
 ├── app.py                    # Streamlit web interface (Phase 7)
 ├── output/                   # Generated datasets (gitignored)
 ├── test_schema.py           # Phase 1 tests
 ├── test_clean_generation.py # Phase 2 tests
 ├── test_corruption.py       # Phase 3 tests
+├── test_recovered_clean.py  # Phase 3.5 tests
 └── generate_sample.py       # Generate sample clean dataset
 ```
 
@@ -208,6 +240,9 @@ python test_clean_generation.py
 
 # Test corruption engine
 python test_corruption.py
+
+# Test recovered clean dataset generation (Phase 3.5)
+python test_recovered_clean.py
 
 # Generate a sample clean dataset
 python generate_sample.py
@@ -256,17 +291,18 @@ This pipeline generates data specifically for the agent in `../data-cleaner`:
 ## Roadmap
 
 ### Completed
-- ✅ Schema definition system
-- ✅ Clean data generation
-- ✅ Corruption engine with 7 strategies
+- ✅ Schema definition system (Phase 1)
+- ✅ Clean data generation (Phase 2)
+- ✅ Corruption engine with 7 strategies (Phase 3)
+- ✅ Recovered clean dataset generation (Phase 3.5)
 
 ### In Progress
-- 🚧 Validation layer
-- 🚧 Pipeline orchestration
-- 🚧 Export and metadata
+- 🚧 Validation layer (Phase 4)
+- 🚧 Pipeline orchestration (Phase 5)
+- 🚧 Export and metadata (Phase 6)
 
 ### Planned
-- 📋 Streamlit web interface
+- 📋 Streamlit web interface (Phase 7)
 - 📋 Batch generation capabilities
 - 📋 Data quality visualizations
 - 📋 LLM-assisted schema generation (optional)
