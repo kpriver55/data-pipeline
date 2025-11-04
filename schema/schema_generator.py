@@ -444,7 +444,7 @@ Values for {column_name}:"""
         self, domain: str, num_columns: int = 10, num_rows: int = 10000
     ) -> DatasetSchema:
         """
-        Use LLM to suggest a complete schema for a domain.
+        Use LLM to suggest a complete schema for a domain (legacy method).
 
         Args:
             domain: Domain context (e.g., "e-commerce", "healthcare")
@@ -457,9 +457,158 @@ Values for {column_name}:"""
         if self.llm_client is None:
             raise ValueError("LLM client required for LLM-assisted generation")
 
-        # This is a simplified implementation
-        # In practice, you'd want more structured prompting and parsing
-        raise NotImplementedError(
-            "Full LLM schema generation not yet implemented. "
-            "Use pre-built schemas or generate_custom_schema() instead."
+        # Use the new description-based method
+        description = f"A {domain} dataset with typical fields for this domain"
+        return self.generate_schema_from_description(
+            description, num_rows=num_rows, num_columns=num_columns
+        )
+
+    def generate_schema_from_description(
+        self,
+        description: str,
+        num_rows: int = 1000,
+        num_columns: Optional[int] = None,
+    ) -> DatasetSchema:
+        """
+        Generate a complete schema from a natural language description.
+
+        This is the PRIMARY LLM use case: User describes their needs,
+        LLM generates the schema config, then hardcoded generators produce data.
+
+        Args:
+            description: Natural language description of the desired dataset
+            num_rows: Number of rows to generate
+            num_columns: Optional hint for number of columns
+
+        Returns:
+            DatasetSchema that can be used with the pipeline
+
+        Example:
+            >>> generator = SchemaGenerator(llm_client=ollama_client)
+            >>> schema = generator.generate_schema_from_description(
+            ...     "I need a dataset for an e-commerce checkout process"
+            ... )
+            >>> df = build_clean_dataset(schema)
+
+        Raises:
+            ValueError: If no LLM client configured
+            RuntimeError: If schema generation or parsing fails
+        """
+        if self.llm_client is None:
+            raise ValueError(
+                "LLM client required for description-based generation. "
+                "Initialize SchemaGenerator with an OllamaClient."
+            )
+
+        # Get schema config from LLM
+        try:
+            config = self.llm_client.generate_schema_config(
+                description, num_rows=num_rows, num_columns=num_columns
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to generate schema config: {e}")
+
+        # Parse config into DatasetSchema
+        try:
+            return self._parse_schema_config(config)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to parse schema config: {e}\n"
+                f"Config: {config}"
+            )
+
+    def _parse_schema_config(self, config: dict) -> DatasetSchema:
+        """
+        Parse LLM-generated schema config into DatasetSchema object.
+
+        Args:
+            config: Schema configuration dictionary from LLM
+
+        Returns:
+            DatasetSchema object
+        """
+        columns = []
+
+        for col_config in config.get("columns", []):
+            col_type = col_config.get("type", "").lower()
+            col_name = col_config.get("name", "")
+            col_desc = col_config.get("description", "")
+
+            if "numeric" in col_type:
+                # Parse numeric column
+                is_float = "float" in col_type
+                distribution_str = col_config.get("distribution", "uniform").upper()
+
+                try:
+                    distribution = NumericDistribution[distribution_str]
+                except KeyError:
+                    distribution = NumericDistribution.UNIFORM  # Default to uniform
+
+                # Set sensible defaults based on column type
+                if is_float:
+                    default_min, default_max = 0.0, 1000.0
+                else:
+                    default_min, default_max = 1, 10000
+
+                # Create numeric config with defaults
+                numeric_config = NumericConfig(
+                    distribution=distribution,
+                    min_value=col_config.get("min_value", default_min),
+                    max_value=col_config.get("max_value", default_max),
+                    mean=col_config.get("mean"),
+                    std=col_config.get("std"),
+                )
+
+                column = ColumnSchema(
+                    name=col_name,
+                    type=ColumnType.NUMERIC_FLOAT if is_float else ColumnType.NUMERIC_INT,
+                    numeric_config=numeric_config,
+                    description=col_desc,
+                )
+
+            elif col_type == "categorical":
+                # Parse categorical column
+                # LLM generates "categories" but our model uses "values"
+                values = col_config.get("categories", col_config.get("values", []))
+                frequencies = col_config.get("frequencies")
+
+                categorical_config = CategoricalConfig(
+                    values=values,
+                    frequencies=frequencies,
+                )
+
+                column = ColumnSchema(
+                    name=col_name,
+                    type=ColumnType.CATEGORICAL,
+                    categorical_config=categorical_config,
+                    description=col_desc,
+                )
+
+            elif col_type == "datetime":
+                # Parse datetime column
+                datetime_config = DatetimeConfig(
+                    start_date=col_config.get("start_date", "2023-01-01"),
+                    end_date=col_config.get("end_date", "2024-12-31"),
+                    business_hours_only=col_config.get("business_hours_only", False),
+                    weekdays_only=col_config.get("weekdays_only", False),
+                )
+
+                column = ColumnSchema(
+                    name=col_name,
+                    type=ColumnType.DATETIME,
+                    datetime_config=datetime_config,
+                    description=col_desc,
+                )
+
+            else:
+                # Unknown type, skip or default to categorical
+                continue
+
+            columns.append(column)
+
+        return DatasetSchema(
+            name=config.get("name", "generated_schema"),
+            domain=config.get("domain", "general"),
+            columns=columns,
+            num_rows=config.get("num_rows", 1000),
         )

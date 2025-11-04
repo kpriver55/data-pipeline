@@ -237,11 +237,11 @@ class ConsistencyChecker:
             dirty_unique = set(dirty_col.dropna().unique())
             recovered_unique = set(recovered_col.dropna().unique())
 
-            # Values in recovered should mostly be from dirty (except for imputed values)
+            # Values in recovered should mostly be from dirty (except for imputed values or text cleaning)
             new_values = recovered_unique - dirty_unique
 
             if len(new_values) > 0:
-                # Check if there was missing value imputation
+                # Check if there was missing value imputation or text cleaning
                 cleaning_ops = [
                     op["operation"] for op in metadata.get("cleaning_operations", [])
                 ]
@@ -252,10 +252,16 @@ class ConsistencyChecker:
                         f"Column '{col}': {len(new_values)} new values appeared "
                         f"(likely imputed): {new_values if len(new_values) <= 5 else list(new_values)[:5]}"
                     )
+                elif "clean_text_columns" in cleaning_ops:
+                    # New values are expected from text cleaning (whitespace removal, case normalization, etc.)
+                    self.warnings.append(
+                        f"Column '{col}': {len(new_values)} values changed due to text cleaning "
+                        f"(expected): {new_values if len(new_values) <= 5 else list(new_values)[:5]}"
+                    )
                 else:
-                    # New values without imputation - suspicious
+                    # New values without expected operations - suspicious
                     self.errors.append(
-                        f"Column '{col}': New values appeared without handle_missing_values: {new_values}"
+                        f"Column '{col}': New values appeared without handle_missing_values or clean_text_columns: {new_values}"
                     )
 
     def _check_no_information_added(
