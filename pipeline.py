@@ -18,6 +18,9 @@ from schema.schema import DatasetSchema
 from schema.schema_generator import SchemaGenerator
 from validation.consistency_checker import validate_dataset_pair
 from validation.solvability_checker import validate_solvability
+from export.exporter import DatasetExporter, ExportFormat
+from export.metadata_generator import generate_metadata
+from export.quality_report_generator import generate_quality_report
 
 
 class SyntheticDataPipeline:
@@ -32,22 +35,33 @@ class SyntheticDataPipeline:
     - Export (metadata and files)
     """
 
-    def __init__(self, validate: bool = True, verbose: bool = True):
+    def __init__(
+        self,
+        validate: bool = True,
+        verbose: bool = True,
+        export_formats: Optional[Union[ExportFormat, List[ExportFormat]]] = None,
+        include_quality_report: bool = True,
+    ):
         """
         Initialize pipeline.
 
         Args:
             validate: Whether to run validation checks
             verbose: Whether to print progress messages
+            export_formats: Export formats to use (default: CSV only)
+            include_quality_report: Whether to generate quality reports
         """
         self.validate = validate
         self.verbose = verbose
+        self.export_formats = export_formats or ExportFormat.CSV
+        self.include_quality_report = include_quality_report
         self.schema_generator = SchemaGenerator()
 
     def generate(
         self,
         config: Union[str, DatasetConfig, Dict[str, Any]],
         output_dir: Optional[Union[str, Path]] = None,
+        include_perfect: bool = False,
     ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
         """
         Generate a dirty/recovered clean dataset pair.
@@ -55,6 +69,7 @@ class SyntheticDataPipeline:
         Args:
             config: Configuration (name, DatasetConfig object, or dict)
             output_dir: Optional directory to save outputs
+            include_perfect: Whether to export perfect synthetic data (for reference)
 
         Returns:
             Tuple of (df_dirty, df_recovered_clean, metadata)
@@ -98,7 +113,12 @@ class SyntheticDataPipeline:
         # Step 5: Export (if output_dir specified)
         if output_dir:
             self._export_datasets(
-                df_dirty, df_recovered, metadata, dataset_config, output_dir
+                df_dirty,
+                df_recovered,
+                metadata,
+                dataset_config,
+                output_dir,
+                df_perfect if include_perfect else None,
             )
 
         if self.verbose:
@@ -278,36 +298,61 @@ class SyntheticDataPipeline:
         metadata: Dict[str, Any],
         config: DatasetConfig,
         output_dir: Union[str, Path],
+        df_perfect: Optional[pd.DataFrame] = None,
     ):
         """Export datasets and metadata to files."""
         if self.verbose:
             print(f"\n[5/5] Exporting to {output_dir}...")
 
         output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
 
-        # Save dirty dataset
-        dirty_path = output_path / "dirty.csv"
-        df_dirty.to_csv(dirty_path, index=False)
+        # Generate comprehensive metadata
+        comprehensive_metadata = generate_metadata(
+            df_dirty=df_dirty,
+            df_recovered_clean=df_recovered,
+            base_metadata=metadata,
+            df_perfect=df_perfect,
+        )
 
-        # Save recovered clean dataset (the actual target)
-        clean_path = output_path / "clean.csv"
-        df_recovered.to_csv(clean_path, index=False)
+        # Generate quality report if enabled
+        if self.include_quality_report:
+            quality_report = generate_quality_report(
+                df_dirty=df_dirty,
+                df_recovered_clean=df_recovered,
+                metadata=metadata,
+                df_perfect=df_perfect,
+            )
+            comprehensive_metadata["quality_report"] = quality_report
 
-        # Save metadata
-        import json
-
-        metadata_path = output_path / "metadata.json"
-
-        # Metadata already has dataset_config added earlier
-        with open(metadata_path, "w") as f:
-            json.dump(metadata, f, indent=2, default=str)
+        # Export using DatasetExporter
+        exporter = DatasetExporter(output_path)
+        exported_files = exporter.export(
+            df_dirty=df_dirty,
+            df_recovered_clean=df_recovered,
+            metadata=comprehensive_metadata,
+            formats=self.export_formats,
+            include_perfect=df_perfect is not None,
+            df_perfect=df_perfect,
+        )
 
         if self.verbose:
-            print(f"  ✓ Files saved:")
-            print(f"    - {dirty_path}")
-            print(f"    - {clean_path}")
-            print(f"    - {metadata_path}")
+            summary = exporter.get_export_summary(exported_files)
+            print(f"  ✓ Exported to: {output_path}")
+            print(f"    Total files: {summary['total_files']}")
+            print(f"    Total size: {summary['total_size_mb']} MB")
+
+            # Show file breakdown
+            for dataset_type in ["dirty", "clean", "perfect", "metadata"]:
+                if dataset_type in summary["files"] and summary["files"][dataset_type]:
+                    files = summary["files"][dataset_type]
+                    if len(files) == 1:
+                        print(f"    {dataset_type.capitalize()}: {files[0]['filename']}")
+                    else:
+                        print(f"    {dataset_type.capitalize()}: {len(files)} files")
+
+            if self.include_quality_report:
+                quality_score = quality_report["summary"]["overall_quality_score"]
+                print(f"    Quality score: {quality_score}/100")
 
 
 # =============================================================================
@@ -320,6 +365,9 @@ def generate_dataset(
     output_dir: Optional[Union[str, Path]] = None,
     validate: bool = True,
     verbose: bool = True,
+    export_formats: Optional[Union[ExportFormat, List[ExportFormat]]] = None,
+    include_quality_report: bool = True,
+    include_perfect: bool = False,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]:
     """
     Convenience function to generate a single dataset pair.
@@ -329,6 +377,9 @@ def generate_dataset(
         output_dir: Optional directory to save outputs
         validate: Whether to run validation checks
         verbose: Whether to print progress
+        export_formats: Export formats (CSV, Parquet, JSON, or list)
+        include_quality_report: Whether to generate quality report
+        include_perfect: Whether to export perfect synthetic data
 
     Returns:
         Tuple of (df_dirty, df_recovered_clean, metadata)
@@ -337,11 +388,17 @@ def generate_dataset(
         >>> df_dirty, df_clean, metadata = generate_dataset("ecommerce_medium")
         >>> df_dirty, df_clean, metadata = generate_dataset(
         ...     "ecommerce_large_hard",
-        ...     output_dir="output/datasets/ecommerce_1"
+        ...     output_dir="output/datasets/ecommerce_1",
+        ...     export_formats=[ExportFormat.CSV, ExportFormat.PARQUET]
         ... )
     """
-    pipeline = SyntheticDataPipeline(validate=validate, verbose=verbose)
-    return pipeline.generate(config, output_dir=output_dir)
+    pipeline = SyntheticDataPipeline(
+        validate=validate,
+        verbose=verbose,
+        export_formats=export_formats,
+        include_quality_report=include_quality_report,
+    )
+    return pipeline.generate(config, output_dir=output_dir, include_perfect=include_perfect)
 
 
 def generate_batch_datasets(
@@ -349,6 +406,8 @@ def generate_batch_datasets(
     output_dir: Optional[Union[str, Path]] = None,
     validate: bool = True,
     verbose: bool = True,
+    export_formats: Optional[Union[ExportFormat, List[ExportFormat]]] = None,
+    include_quality_report: bool = True,
 ) -> List[Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]]:
     """
     Convenience function to generate multiple dataset pairs.
@@ -358,6 +417,8 @@ def generate_batch_datasets(
         output_dir: Optional base directory for outputs
         validate: Whether to run validation checks
         verbose: Whether to print progress
+        export_formats: Export formats (CSV, Parquet, JSON, or list)
+        include_quality_report: Whether to generate quality reports
 
     Returns:
         List of (df_dirty, df_recovered_clean, metadata) tuples
@@ -369,7 +430,12 @@ def generate_batch_datasets(
         ...     "ecommerce_large_hard"
         ... ], output_dir="output/training_set")
     """
-    pipeline = SyntheticDataPipeline(validate=validate, verbose=verbose)
+    pipeline = SyntheticDataPipeline(
+        validate=validate,
+        verbose=verbose,
+        export_formats=export_formats,
+        include_quality_report=include_quality_report,
+    )
     return pipeline.generate_batch(configs, output_dir=output_dir)
 
 
@@ -381,6 +447,8 @@ def generate_training_set(
     rows_per_dataset: int = 1000,
     output_dir: Optional[Union[str, Path]] = None,
     base_seed: int = 42,
+    export_formats: Optional[Union[ExportFormat, List[ExportFormat]]] = None,
+    include_quality_report: bool = True,
 ) -> List[Tuple[pd.DataFrame, pd.DataFrame, Dict[str, Any]]]:
     """
     Generate a training set with multiple difficulty levels.
@@ -393,6 +461,8 @@ def generate_training_set(
         rows_per_dataset: Rows per dataset
         output_dir: Optional output directory
         base_seed: Base random seed (incremented for each dataset)
+        export_formats: Export formats (CSV, Parquet, JSON, or list)
+        include_quality_report: Whether to generate quality reports
 
     Returns:
         List of (df_dirty, df_recovered_clean, metadata) tuples
@@ -451,4 +521,9 @@ def generate_training_set(
         )
         seed += 1
 
-    return generate_batch_datasets(configs, output_dir=output_dir)
+    return generate_batch_datasets(
+        configs,
+        output_dir=output_dir,
+        export_formats=export_formats,
+        include_quality_report=include_quality_report,
+    )
